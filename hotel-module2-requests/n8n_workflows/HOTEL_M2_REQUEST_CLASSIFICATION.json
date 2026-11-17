@@ -1,0 +1,248 @@
+{
+  "name": "HOTEL_M2_REQUEST_CLASSIFICATION",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "hotel-m2-request-classification",
+        "options": {}
+      },
+      "id": "e1111111-0001-4000-8000-000000000001",
+      "name": "Supabase Webhook",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [
+        200,
+        300
+      ],
+      "webhookId": "hotel-m2-request-classification"
+    },
+    {
+      "parameters": {
+        "jsCode": "const body = $input.first().json.body || $input.first().json;\nconst record = body.record || body;\n\nif (!record || !record.id) {\n  throw new Error('Invalid webhook payload: missing record.id');\n}\n\nconst supabaseUrl = 'https://YOUR_PROJECT_ID.supabase.co';\nconst supabaseKey = 'YOUR_SUPABASE_SERVICE_ROLE_KEY';\n\nreturn [{\n  json: {\n    id: record.id,\n    guest_id: record.guest_id,\n    room_id: record.room_id,\n    description: record.description || '',\n    status: record.status || 'new',\n    category: record.category || null,\n    created_at: record.created_at,\n    supabase_url: supabaseUrl.replace(/\\/$/, ''),\n    supabase_key: supabaseKey\n  }\n}];"
+      },
+      "id": "e1111111-0002-4000-8000-000000000002",
+      "name": "Validate Webhook Payload",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        420,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict"
+          },
+          "conditions": [
+            {
+              "id": "c1",
+              "leftValue": "={{ $json.status }}",
+              "rightValue": "new",
+              "operator": {
+                "type": "string",
+                "operation": "equals"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "e1111111-0003-4000-8000-000000000003",
+      "name": "Is Status New?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [
+        640,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "promptType": "define",
+        "text": "=System instruction:\nYou classify hotel guest requests. Respond with JSON only, no prose, no markdown.\nSchema:\n{\"category\":\"housekeeping|maintenance|room_service|complaint|other\",\"priority\":\"low|normal|high|urgent\",\"summary\":\"one clear sentence in English\",\"sentiment\":\"positive|neutral|negative|null\"}\nRules:\n- category: housekeeping = cleaning, towels, linen, amenities; maintenance = repairs, AC, plumbing, electricity, broken items; room_service = food and drink orders; complaint = expressed dissatisfaction or anger about the stay; other = anything else.\n- priority: urgent = safety risk, leak, no power or water, lockout; high = affects comfort now; normal = standard request; low = non-time-sensitive.\n- sentiment: set only when category is complaint, otherwise null.\n- The guest message may be Arabic or English; summary is always English.\n- A prefix like [Guest selected: X] is only a hint; decide from the content.\n- Never invent details that are not in the message.\n\nUser message:\n{{ $json.description }}"
+      },
+      "id": "e1111111-0004-4000-8000-000000000004",
+      "name": "Classification Chain",
+      "type": "@n8n/n8n-nodes-langchain.chainLlm",
+      "typeVersion": 1.4,
+      "position": [
+        880,
+        280
+      ]
+    },
+    {
+      "parameters": {
+        "model": "openai/gpt-oss-120b",
+        "options": {
+          "temperature": 0.1
+        }
+      },
+      "id": "e1111111-0005-4000-8000-000000000005",
+      "name": "Groq Chat Model",
+      "type": "@n8n/n8n-nodes-langchain.lmChatGroq",
+      "typeVersion": 1,
+      "position": [
+        880,
+        500
+      ],
+      "credentials": {
+        "groqApi": {
+          "id": "",
+          "name": "Groq account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "const orig = $node[\"Validate Webhook Payload\"].json;\nconst description = orig.description || '';\nconst lower = description.toLowerCase();\n\nlet rawText = '';\ntry {\n  const inputData = $input.first().json;\n  rawText = inputData.text || inputData.response || inputData.output || JSON.stringify(inputData);\n} catch (e) {\n  rawText = '';\n}\nrawText = String(rawText).replace(/```(?:json)?/gi, '').replace(/```/g, '').trim();\n\nlet parsed = {};\ntry {\n  const match = rawText.match(/\\{[\\s\\S]*\\}/);\n  parsed = JSON.parse(match ? match[0] : rawText);\n} catch (err) {\n  parsed = {};\n}\nif (!parsed || typeof parsed !== 'object') {\n  parsed = {};\n}\n\nconst validCategories = ['housekeeping', 'maintenance', 'room_service', 'complaint', 'other'];\nconst validPriorities = ['low', 'normal', 'high', 'urgent'];\nconst validSentiments = ['positive', 'neutral', 'negative'];\n\nconst keywordCategories = {\n  maintenance: ['ac ', 'a/c', 'air condition', 'plumbing', 'toilet', 'shower', 'leak', 'broken', 'not working', 'electric', 'power', 'light', 'tv', 'heater', 'تكييف', 'مكيف', 'سباك', 'تسريب', 'كهرباء', 'عطل', 'مكسور', 'لا يعمل'],\n  housekeeping: ['clean', 'towel', 'linen', 'sheet', 'pillow', 'blanket', 'soap', 'shampoo', 'amenit', 'تنظيف', 'نظافة', 'منشفة', 'مناشف', 'ملاءة', 'ملايات', 'وسادة', 'بطانية'],\n  room_service: ['food', 'meal', 'breakfast', 'lunch', 'dinner', 'drink', 'coffee', 'water bottle', 'menu', 'order', 'طعام', 'أكل', 'اكل', 'مشروب', 'فطار', 'غداء', 'عشاء', 'قهوة'],\n  complaint: ['complain', 'unacceptable', 'terrible', 'awful', 'worst', 'disappointed', 'angry', 'rude', 'noisy', 'dirty', 'شكوى', 'سيء', 'سيئ', 'مستاء', 'غاضب', 'مزعج', 'قذر']\n};\n\nlet category = String(parsed.category || '').toLowerCase().trim();\nlet priority = String(parsed.priority || '').toLowerCase().trim();\nlet summary = parsed.summary ? String(parsed.summary).trim() : '';\nlet sentiment = parsed.sentiment ? String(parsed.sentiment).toLowerCase().trim() : null;\n\nif (!validCategories.includes(category)) {\n  category = 'other';\n  for (const [name, words] of Object.entries(keywordCategories)) {\n    if (words.some(w => lower.includes(w))) {\n      category = name;\n      break;\n    }\n  }\n}\nif (!validPriorities.includes(priority)) {\n  priority = 'normal';\n}\nif (!summary) {\n  summary = description.trim().slice(0, 200) || 'Guest request processed.';\n}\n\nconst urgentKeywords = [\n  'leak', 'leaking', 'flood', 'flooding', 'fire', 'smoke', 'spark', 'electric',\n  'lockout', 'locked out', 'no power', 'no electricity', 'danger', 'hazard',\n  'تسريب', 'حريق', 'دخان', 'كهرباء', 'ماس', 'محبوس', 'غرق'\n];\nif (urgentKeywords.some(kw => lower.includes(kw))) {\n  priority = 'urgent';\n}\n\nif (category === 'complaint') {\n  if (priority === 'low') {\n    priority = 'normal';\n  }\n  if (!validSentiments.includes(sentiment)) {\n    sentiment = 'negative';\n  }\n} else {\n  sentiment = null;\n}\n\nreturn [{\n  json: {\n    id: orig.id,\n    category,\n    priority,\n    ai_summary: summary,\n    sentiment,\n    status: 'classified',\n    supabase_url: orig.supabase_url,\n    supabase_key: orig.supabase_key\n  }\n}];"
+      },
+      "id": "e1111111-0006-4000-8000-000000000006",
+      "name": "Parse & Apply Deterministic Rules",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1120,
+        280
+      ]
+    },
+    {
+      "parameters": {
+        "method": "PATCH",
+        "url": "={{ $json.supabase_url }}/rest/v1/guest_requests?id=eq.{{ $json.id }}&status=eq.new",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "apikey",
+              "value": "={{ $json.supabase_key }}"
+            },
+            {
+              "name": "Authorization",
+              "value": "=Bearer {{ $json.supabase_key }}"
+            },
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            },
+            {
+              "name": "Prefer",
+              "value": "return=representation"
+            }
+          ]
+        },
+        "sendBody": true,
+        "bodyParameters": {
+          "parameters": [
+            {
+              "name": "category",
+              "value": "={{ $json.category }}"
+            },
+            {
+              "name": "priority",
+              "value": "={{ $json.priority }}"
+            },
+            {
+              "name": "ai_summary",
+              "value": "={{ $json.ai_summary }}"
+            },
+            {
+              "name": "sentiment",
+              "value": "={{ $json.sentiment }}"
+            },
+            {
+              "name": "status",
+              "value": "classified"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "e1111111-0007-4000-8000-000000000007",
+      "name": "Update Request in Supabase",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        1340,
+        280
+      ]
+    }
+  ],
+  "connections": {
+    "Supabase Webhook": {
+      "main": [
+        [
+          {
+            "node": "Validate Webhook Payload",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Validate Webhook Payload": {
+      "main": [
+        [
+          {
+            "node": "Is Status New?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Is Status New?": {
+      "main": [
+        [
+          {
+            "node": "Classification Chain",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        []
+      ]
+    },
+    "Groq Chat Model": {
+      "ai_languageModel": [
+        [
+          {
+            "node": "Classification Chain",
+            "type": "ai_languageModel",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Classification Chain": {
+      "main": [
+        [
+          {
+            "node": "Parse & Apply Deterministic Rules",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Parse & Apply Deterministic Rules": {
+      "main": [
+        [
+          {
+            "node": "Update Request in Supabase",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1"
+  }
+}
