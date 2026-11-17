@@ -1,0 +1,306 @@
+{
+  "name": "HOTEL_M2_FEEDBACK_ANALYSIS",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "hotel-m2-feedback-analysis",
+        "options": {}
+      },
+      "id": "f2222222-0001-4000-8000-000000000001",
+      "name": "Supabase Webhook",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [
+        200,
+        300
+      ],
+      "webhookId": "hotel-m2-feedback-analysis"
+    },
+    {
+      "parameters": {
+        "jsCode": "const body = $input.first().json.body || $input.first().json;\nconst record = body.record || body;\n\nif (!record || !record.id) {\n  throw new Error('Invalid webhook payload: missing feedback record.id');\n}\n\nconst supabaseUrl = 'https://YOUR_PROJECT_ID.supabase.co';\nconst supabaseKey = 'YOUR_SUPABASE_SERVICE_ROLE_KEY';\n\nconst rating = Number(record.rating) || 3;\nconst comment = (record.comment || '').trim();\nconst sentiment = record.sentiment || null;\n\nreturn [{\n  json: {\n    id: record.id,\n    guest_id: record.guest_id,\n    booking_id: record.booking_id,\n    rating,\n    comment,\n    sentiment,\n    has_comment: comment.length > 0,\n    supabase_url: supabaseUrl.replace(/\\/$/, ''),\n    supabase_key: supabaseKey\n  }\n}];"
+      },
+      "id": "f2222222-0002-4000-8000-000000000002",
+      "name": "Validate Feedback Payload",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        420,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict"
+          },
+          "conditions": [
+            {
+              "id": "c_null",
+              "leftValue": "={{ $json.sentiment }}",
+              "rightValue": "",
+              "operator": {
+                "type": "string",
+                "operation": "isEmpty"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "f2222222-0003-4000-8000-000000000003",
+      "name": "Is Sentiment Null?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [
+        640,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict"
+          },
+          "conditions": [
+            {
+              "id": "c_comment",
+              "leftValue": "={{ $json.has_comment }}",
+              "rightValue": true,
+              "operator": {
+                "type": "boolean",
+                "operation": "equals"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "f2222222-0004-4000-8000-000000000004",
+      "name": "Has Comment?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [
+        860,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "const rating = $json.rating;\nlet sentiment = 'neutral';\n\nif (rating >= 4) {\n  sentiment = 'positive';\n} else if (rating <= 2) {\n  sentiment = 'negative';\n} else {\n  sentiment = 'neutral';\n}\n\nreturn [{\n  json: {\n    id: $json.id,\n    sentiment,\n    supabase_url: $json.supabase_url,\n    supabase_key: $json.supabase_key\n  }\n}];"
+      },
+      "id": "f2222222-0005-4000-8000-000000000005",
+      "name": "Derive Sentiment From Rating Rule",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1100,
+        440
+      ]
+    },
+    {
+      "parameters": {
+        "promptType": "define",
+        "text": "=System instruction:\nYou are an AI analyzer evaluating hotel guest feedback. Analyze the guest's rating (1 to 5) and written comment.\nReturn JSON only, with no markdown code blocks:\n{\"sentiment\":\"positive|neutral|negative\"}\n\nGuest Rating: {{ $json.rating }} / 5\nGuest Comment:\n{{ $json.comment }}"
+      },
+      "id": "f2222222-0006-4000-8000-000000000006",
+      "name": "Sentiment Chain",
+      "type": "@n8n/n8n-nodes-langchain.chainLlm",
+      "typeVersion": 1.4,
+      "position": [
+        1100,
+        180
+      ]
+    },
+    {
+      "parameters": {
+        "model": "openai/gpt-oss-120b",
+        "options": {
+          "temperature": 0.1
+        }
+      },
+      "id": "f2222222-0007-4000-8000-000000000007",
+      "name": "Groq Chat Model",
+      "type": "@n8n/n8n-nodes-langchain.lmChatGroq",
+      "typeVersion": 1,
+      "position": [
+        1100,
+        -40
+      ],
+      "credentials": {
+        "groqApi": {
+          "id": "",
+          "name": "Groq account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "const orig = $node[\"Validate Feedback Payload\"].json;\nconst rating = Number(orig.rating) || 3;\nconst lower = (orig.comment || '').toLowerCase();\n\nconst fromRating = () => {\n  if (rating >= 4) return 'positive';\n  if (rating <= 2) return 'negative';\n  const negative = ['bad', 'poor', 'dirty', 'rude', 'noisy', 'terrible', 'awful', 'disappointed', 'سيء', 'سيئ', 'قذر', 'مزعج', 'مستاء'];\n  const positive = ['good', 'great', 'excellent', 'clean', 'friendly', 'comfortable', 'amazing', 'جيد', 'ممتاز', 'رائع', 'نظيف', 'مريح'];\n  const neg = negative.some(w => lower.includes(w));\n  const pos = positive.some(w => lower.includes(w));\n  if (neg && !pos) return 'negative';\n  if (pos && !neg) return 'positive';\n  return 'neutral';\n};\n\nlet rawText = '';\ntry {\n  const inputData = $input.first().json;\n  rawText = inputData.text || inputData.response || inputData.output || JSON.stringify(inputData);\n} catch (e) {\n  rawText = '';\n}\nrawText = String(rawText).replace(/```(?:json)?/gi, '').replace(/```/g, '').trim();\n\nlet parsed = {};\ntry {\n  const match = rawText.match(/\\{[\\s\\S]*\\}/);\n  parsed = JSON.parse(match ? match[0] : rawText);\n} catch (err) {\n  parsed = {};\n}\nif (!parsed || typeof parsed !== 'object') {\n  parsed = {};\n}\n\nlet sentiment = String(parsed.sentiment || '').toLowerCase().trim();\nif (!['positive', 'neutral', 'negative'].includes(sentiment)) {\n  sentiment = fromRating();\n}\n\nreturn [{\n  json: {\n    id: orig.id,\n    sentiment,\n    supabase_url: orig.supabase_url,\n    supabase_key: orig.supabase_key\n  }\n}];"
+      },
+      "id": "f2222222-0008-4000-8000-000000000008",
+      "name": "Parse Sentiment",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1340,
+        180
+      ]
+    },
+    {
+      "parameters": {
+        "method": "PATCH",
+        "url": "={{ $json.supabase_url }}/rest/v1/feedback?id=eq.{{ $json.id }}&sentiment=is.null",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "apikey",
+              "value": "={{ $json.supabase_key }}"
+            },
+            {
+              "name": "Authorization",
+              "value": "=Bearer {{ $json.supabase_key }}"
+            },
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            },
+            {
+              "name": "Prefer",
+              "value": "return=representation"
+            }
+          ]
+        },
+        "sendBody": true,
+        "bodyParameters": {
+          "parameters": [
+            {
+              "name": "sentiment",
+              "value": "={{ $json.sentiment }}"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "f2222222-0009-4000-8000-000000000009",
+      "name": "Update Feedback in Supabase",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        1580,
+        300
+      ]
+    }
+  ],
+  "connections": {
+    "Supabase Webhook": {
+      "main": [
+        [
+          {
+            "node": "Validate Feedback Payload",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Validate Feedback Payload": {
+      "main": [
+        [
+          {
+            "node": "Is Sentiment Null?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Is Sentiment Null?": {
+      "main": [
+        [
+          {
+            "node": "Has Comment?",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        []
+      ]
+    },
+    "Has Comment?": {
+      "main": [
+        [
+          {
+            "node": "Sentiment Chain",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Derive Sentiment From Rating Rule",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Groq Chat Model": {
+      "ai_languageModel": [
+        [
+          {
+            "node": "Sentiment Chain",
+            "type": "ai_languageModel",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Sentiment Chain": {
+      "main": [
+        [
+          {
+            "node": "Parse Sentiment",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Parse Sentiment": {
+      "main": [
+        [
+          {
+            "node": "Update Feedback in Supabase",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Derive Sentiment From Rating Rule": {
+      "main": [
+        [
+          {
+            "node": "Update Feedback in Supabase",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1"
+  }
+}
