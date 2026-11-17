@@ -1,0 +1,208 @@
+{
+  "name": "HOTEL_M3_TASK_ASSIGNMENT",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "hotel-m3-task-assignment",
+        "options": {}
+      },
+      "id": "node-webhook-trigger",
+      "name": "Webhook Trigger (Supabase DB Webhook / Gateway)",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [200, 300]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "string": [
+            {
+              "value1": "={{ $json.body.task_id || $json.body.record.id }}",
+              "operation": "isNotEmpty"
+            }
+          ]
+        }
+      },
+      "id": "node-validate-task",
+      "name": "Validate Task ID Exists",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 1,
+      "position": [440, 300]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT t.id, t.department_id, t.priority, t.status, t.assigned_employee_id FROM public.tasks t WHERE t.id = '{{ $json.body.task_id || $json.body.record.id }}'::uuid LIMIT 1;"
+      },
+      "id": "node-check-task-state",
+      "name": "Fetch Task & Check State",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [680, 300]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "boolean": [
+            {
+              "value1": "={{ Boolean($json.assigned_employee_id) }}",
+              "value2": true
+            }
+          ]
+        }
+      },
+      "id": "node-if-already-assigned",
+      "name": "Already Assigned? (Idempotency)",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 1,
+      "position": [920, 300]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT e.id AS employee_id, e.profile_id, p.full_name, COALESCE(SUM(CASE t.priority WHEN 'urgent' THEN 3 WHEN 'high' THEN 2 WHEN 'normal' THEN 1 WHEN 'low' THEN 1 ELSE 0 END), 0) AS workload_score FROM public.employees e JOIN public.profiles p ON p.id = e.profile_id LEFT JOIN public.tasks t ON t.assigned_employee_id = e.id AND t.status IN ('assigned', 'in_progress') WHERE e.department_id = '{{ $('Fetch Task & Check State').item.json.department_id }}'::uuid AND e.is_active = true GROUP BY e.id, e.profile_id, p.full_name ORDER BY workload_score ASC, e.id ASC LIMIT 1;"
+      },
+      "id": "node-find-best-candidate",
+      "name": "Find Active Staff with Lowest Workload",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [1160, 380]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "UPDATE public.tasks SET assigned_employee_id = '{{ $json.employee_id }}'::uuid, status = 'assigned' WHERE id = '{{ $('Fetch Task & Check State').item.json.id }}'::uuid RETURNING id, title, priority, status, assigned_employee_id;"
+      },
+      "id": "node-update-task",
+      "name": "Update Task to Assigned",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [1400, 380]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "INSERT INTO public.notifications (profile_id, title, message, is_read) VALUES ('{{ $('Find Active Staff with Lowest Workload').item.json.profile_id }}'::uuid, 'New Task Assigned', 'You have been assigned task: ' || '{{ $json.title }}', false) RETURNING id;"
+      },
+      "id": "node-notify-employee",
+      "name": "Insert Notification for Staff",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [1640, 380]
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ { status: 'success', message: 'Task assigned successfully', task_id: $json.id } }}",
+        "options": {}
+      },
+      "id": "node-respond-success",
+      "name": "Respond Success",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.1,
+      "position": [1880, 380]
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ { status: 'skipped', message: 'Task already assigned or completed' } }}",
+        "options": {}
+      },
+      "id": "node-respond-skipped",
+      "name": "Respond Skipped",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.1,
+      "position": [1160, 200]
+    }
+  ],
+  "connections": {
+    "Webhook Trigger (Supabase DB Webhook / Gateway)": {
+      "main": [
+        [
+          {
+            "node": "Validate Task ID Exists",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Validate Task ID Exists": {
+      "main": [
+        [
+          {
+            "node": "Fetch Task & Check State",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Fetch Task & Check State": {
+      "main": [
+        [
+          {
+            "node": "Already Assigned? (Idempotency)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Already Assigned? (Idempotency)": {
+      "main": [
+        [
+          {
+            "node": "Respond Skipped",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Find Active Staff with Lowest Workload",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Find Active Staff with Lowest Workload": {
+      "main": [
+        [
+          {
+            "node": "Update Task to Assigned",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Update Task to Assigned": {
+      "main": [
+        [
+          {
+            "node": "Insert Notification for Staff",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Insert Notification for Staff": {
+      "main": [
+        [
+          {
+            "node": "Respond Success",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1"
+  }
+}

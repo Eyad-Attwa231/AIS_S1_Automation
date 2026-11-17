@@ -1,0 +1,220 @@
+{
+  "name": "HOTEL_M3_NOTIFICATIONS_ESCALATION",
+  "nodes": [
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "minutes",
+              "minutesInterval": 15
+            }
+          ]
+        }
+      },
+      "id": "node-schedule-cron",
+      "name": "Every 15 Minutes Schedule",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [200, 300]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT t.id AS task_id, t.title, t.priority, t.status, t.due_at, t.department_id, t.assigned_employee_id, e.id AS employee_id, p.id AS profile_id, p.full_name AS employee_name, d.name AS department_name, EXISTS (SELECT 1 FROM public.notifications n WHERE n.message LIKE '%' || t.id::text || '%' AND (n.title LIKE 'Task Auto-Reassigned:%' OR n.title LIKE 'Overdue Task Reassigned to You:%' OR n.message LIKE '%[REASSIGNED_ONCE]%')) AS already_reassigned FROM public.tasks t LEFT JOIN public.employees e ON e.id = t.assigned_employee_id LEFT JOIN public.profiles p ON p.id = e.profile_id LEFT JOIN public.departments d ON d.id = t.department_id WHERE t.status IN ('assigned', 'in_progress') AND t.due_at < now() AND NOT EXISTS (SELECT 1 FROM public.notifications n WHERE n.message LIKE '%' || t.id::text || '%' AND n.created_at > now() - interval '30 minutes');"
+      },
+      "id": "node-find-overdue-tasks",
+      "name": "Find Overdue Tasks Breaching SLA",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [460, 300]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "INSERT INTO public.notifications (profile_id, title, message, is_read)\nSELECT \n  p.id, \n  'URGENT SLA BREACH: ' || '{{ $json.title }}', \n  'Task \"' || '{{ $json.title }}' || '\" in ' || '{{ $json.department_name || 'Operations' }}' || ' is past its SLA deadline! Ref: ' || '{{ $json.task_id }}', \n  false \nFROM public.profiles p \nWHERE p.role = 'admin'\n\nUNION ALL\n\nSELECT \n  NULLIF('{{ $json.profile_id }}', '')::uuid, \n  'SLA Delayed Warning: ' || '{{ $json.title }}', \n  'Your assigned task \"' || '{{ $json.title }}' || '\" is overdue. Ref: ' || '{{ $json.task_id }}', \n  false \nWHERE NULLIF('{{ $json.profile_id }}', '') IS NOT NULL;"
+      },
+      "id": "node-insert-escalation-notifs",
+      "name": "Insert Escalation Notifications",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [720, 300]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "string": [
+            {
+              "value1": "={{ $('Find Overdue Tasks Breaching SLA').item.json.status }}",
+              "operation": "equal",
+              "value2": "assigned"
+            }
+          ],
+          "boolean": [
+            {
+              "value1": "={{ Boolean($('Find Overdue Tasks Breaching SLA').item.json.already_reassigned) }}",
+              "value2": false
+            }
+          ]
+        },
+        "combineOperation": "all"
+      },
+      "id": "node-if-eligible-reassignment",
+      "name": "Eligible for Auto-Reassignment? (Assigned & Once Only)",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 1,
+      "position": [980, 300]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT\n  t_ctx.task_id,\n  t_ctx.title,\n  t_ctx.priority,\n  t_ctx.status,\n  t_ctx.department_id,\n  t_ctx.department_name,\n  t_ctx.old_employee_id,\n  t_ctx.old_profile_id,\n  t_ctx.old_employee_name,\n  cand.employee_id AS new_employee_id,\n  cand.profile_id AS new_profile_id,\n  cand.full_name AS new_employee_name,\n  cand.active_tasks_count\nFROM (\n  SELECT\n    '{{ $('Find Overdue Tasks Breaching SLA').item.json.task_id }}'::uuid AS task_id,\n    '{{ $('Find Overdue Tasks Breaching SLA').item.json.title }}' AS title,\n    '{{ $('Find Overdue Tasks Breaching SLA').item.json.priority }}' AS priority,\n    '{{ $('Find Overdue Tasks Breaching SLA').item.json.status }}' AS status,\n    NULLIF('{{ $('Find Overdue Tasks Breaching SLA').item.json.department_id }}', '')::uuid AS department_id,\n    '{{ $('Find Overdue Tasks Breaching SLA').item.json.department_name || 'Operations' }}' AS department_name,\n    NULLIF('{{ $('Find Overdue Tasks Breaching SLA').item.json.employee_id }}', '')::uuid AS old_employee_id,\n    NULLIF('{{ $('Find Overdue Tasks Breaching SLA').item.json.profile_id }}', '')::uuid AS old_profile_id,\n    '{{ $('Find Overdue Tasks Breaching SLA').item.json.employee_name || 'Previous Assignee' }}' AS old_employee_name\n) t_ctx\nLEFT JOIN LATERAL (\n  SELECT\n    e.id AS employee_id,\n    e.profile_id,\n    p.full_name,\n    COUNT(t.id) AS active_tasks_count\n  FROM public.employees e\n  JOIN public.profiles p ON p.id = e.profile_id\n  LEFT JOIN public.tasks t\n    ON t.assigned_employee_id = e.id\n   AND t.status IN ('assigned', 'in_progress')\n  WHERE e.department_id = t_ctx.department_id\n    AND e.is_active = true\n    AND (t_ctx.old_employee_id IS NULL OR e.id <> t_ctx.old_employee_id)\n    AND NOT EXISTS (\n      SELECT 1 FROM public.notifications nr\n      WHERE nr.message LIKE '%' || t_ctx.task_id::text || '%'\n        AND (\n          nr.title LIKE 'Task Auto-Reassigned:%'\n          OR nr.title LIKE 'Overdue Task Reassigned to You:%'\n          OR nr.message LIKE '%[REASSIGNED_ONCE]%'\n        )\n    )\n  GROUP BY e.id, e.profile_id, p.full_name\n  ORDER BY active_tasks_count ASC, e.id ASC\n  LIMIT 1\n) cand ON true;"
+      },
+      "id": "node-find-replacement-employee",
+      "name": "Find Replacement Active Staff with Lowest Workload",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [1240, 300]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "string": [
+            {
+              "value1": "={{ $json.new_employee_id || '' }}",
+              "operation": "isNotEmpty"
+            }
+          ]
+        }
+      },
+      "id": "node-if-replacement-found",
+      "name": "Other Active Employee Available?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 1,
+      "position": [1500, 300]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "UPDATE public.tasks\nSET assigned_employee_id = '{{ $json.new_employee_id }}'::uuid,\n    status = 'assigned'\nWHERE id = '{{ $json.task_id }}'::uuid\n  AND status = 'assigned'\nRETURNING id, title, priority, status, assigned_employee_id;"
+      },
+      "id": "node-reassign-overdue-task",
+      "name": "Reassign Overdue Task to New Employee",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [1760, 220]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "INSERT INTO public.notifications (profile_id, title, message, is_read)\nSELECT\n  '{{ $('Find Replacement Active Staff with Lowest Workload').item.json.new_profile_id }}'::uuid,\n  'Overdue Task Reassigned to You: ' || '{{ $('Find Replacement Active Staff with Lowest Workload').item.json.title }}',\n  'You have been assigned overdue task \"' || '{{ $('Find Replacement Active Staff with Lowest Workload').item.json.title }}' || '\" in ' || '{{ $('Find Replacement Active Staff with Lowest Workload').item.json.department_name }}' || ' (reassigned due to SLA breach). [REASSIGNED_ONCE] Ref: ' || '{{ $('Find Replacement Active Staff with Lowest Workload').item.json.task_id }}',\n  false\nWHERE NULLIF('{{ $('Find Replacement Active Staff with Lowest Workload').item.json.new_profile_id }}', '') IS NOT NULL\n\nUNION ALL\n\nSELECT\n  p.id,\n  'Task Auto-Reassigned: ' || '{{ $('Find Replacement Active Staff with Lowest Workload').item.json.title }}',\n  'Task \"' || '{{ $('Find Replacement Active Staff with Lowest Workload').item.json.title }}' || '\" in ' || '{{ $('Find Replacement Active Staff with Lowest Workload').item.json.department_name }}' || ' was overdue in assigned status and has been automatically reassigned from ' || '{{ $('Find Replacement Active Staff with Lowest Workload').item.json.old_employee_name }}' || ' to ' || '{{ $('Find Replacement Active Staff with Lowest Workload').item.json.new_employee_name }}' || '. [REASSIGNED_ONCE] Ref: ' || '{{ $('Find Replacement Active Staff with Lowest Workload').item.json.task_id }}',\n  false\nFROM public.profiles p\nWHERE p.role = 'admin';"
+      },
+      "id": "node-insert-reassignment-notifs",
+      "name": "Insert Reassignment Notifications (New Employee & Admin)",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [2020, 220]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "INSERT INTO public.notifications (profile_id, title, message, is_read)\nSELECT\n  p.id,\n  'Auto-Reassignment Unavailable: ' || '{{ $json.title }}',\n  'Overdue task \"' || '{{ $json.title }}' || '\" in ' || '{{ $json.department_name }}' || ' is still in assigned status, but no other active employee is available in the department for reassignment. Ref: ' || '{{ $json.task_id }}',\n  false\nFROM public.profiles p\nWHERE p.role = 'admin';"
+      },
+      "id": "node-notify-admin-no-replacement",
+      "name": "Notify Admin Only (No Replacement Available)",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [1760, 420]
+    }
+  ],
+  "connections": {
+    "Every 15 Minutes Schedule": {
+      "main": [
+        [
+          {
+            "node": "Find Overdue Tasks Breaching SLA",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Find Overdue Tasks Breaching SLA": {
+      "main": [
+        [
+          {
+            "node": "Insert Escalation Notifications",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Insert Escalation Notifications": {
+      "main": [
+        [
+          {
+            "node": "Eligible for Auto-Reassignment? (Assigned & Once Only)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Eligible for Auto-Reassignment? (Assigned & Once Only)": {
+      "main": [
+        [
+          {
+            "node": "Find Replacement Active Staff with Lowest Workload",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        []
+      ]
+    },
+    "Find Replacement Active Staff with Lowest Workload": {
+      "main": [
+        [
+          {
+            "node": "Other Active Employee Available?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Other Active Employee Available?": {
+      "main": [
+        [
+          {
+            "node": "Reassign Overdue Task to New Employee",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Notify Admin Only (No Replacement Available)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Reassign Overdue Task to New Employee": {
+      "main": [
+        [
+          {
+            "node": "Insert Reassignment Notifications (New Employee & Admin)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1"
+  }
+}
